@@ -65,8 +65,10 @@ PHONE_SCAN_PATTERNS = [
 ]
 
 # URL Pattern (for scanning text)
+# Captures URLs with various TLDs including country codes (.in, .co.in), 
+# new gTLDs (.work, .xyz, .online), and multi-part TLDs (.claim.in)
 URL_SCAN_PATTERN = re.compile(
-    r"https?://[^\s<>\"'{}|\\^`\[\]]+",
+    r"https?://[\w.-]+(?:\.[a-z]{2,10})+(?:/[^\s<>\"'{}|\\^`\[\]]*)?",
     re.IGNORECASE,
 )
 
@@ -326,8 +328,10 @@ class IntelligenceExtractor:
 
         raw_urls = ai_extracted.get("urls", [])
         for url in raw_urls:
-            if is_suspicious_url(str(url)):
-                result.phishing_links.append(str(url))
+            # In honeypot context, all URLs are suspicious - no filtering needed
+            url_str = str(url).strip()
+            if url_str:  # Only check non-empty
+                result.phishing_links.append(url_str)
 
         raw_emails = ai_extracted.get("emails", [])
         for email in raw_emails:
@@ -461,17 +465,17 @@ class IntelligenceExtractor:
         return list(phones)
 
     def _extract_urls(self, text: str) -> list[str]:
-        """Extract URLs, flagging suspicious ones."""
+        """Extract ALL URLs from scammer messages (no filtering in honeypot context)."""
         urls = set()
 
         matches = URL_SCAN_PATTERN.findall(text)
         for url in matches:
             # Clean trailing punctuation
             clean_url = url.rstrip(".,;:!?)")
-
-            # Only include suspicious URLs (likely phishing)
-            if is_suspicious_url(clean_url):
-                urls.add(clean_url)
+            
+            # In honeypot context, ANY URL from a scammer is intelligence
+            # No filtering needed - we already know it's a scam conversation
+            urls.add(clean_url)
 
         return list(urls)
 
@@ -624,20 +628,8 @@ class IntelligenceExtractor:
         return domain in upi_providers
 
     def _is_valid_name(self, name: str) -> bool:
-        """Validate beneficiary name."""
-        if not name or len(name) < 2:
-            return False
-        # Should contain only letters, spaces, and common name characters
-        if not re.match(r"^[A-Za-z][A-Za-z\s.''-]+$", name):
-            return False
-        # Should have reasonable length (2-50 characters)
-        if len(name) > 50:
-            return False
-        # Should not be common words that might be false positives
-        common_words = ["the", "and", "for", "with", "from", "bank", "account", "transfer", "send", "pay"]
-        if name.lower() in common_words:
-            return False
-        return True
+        """Validate beneficiary name using centralized validation with blocklist."""
+        return validate_beneficiary_name(name)
 
     def _is_valid_ifsc(self, ifsc: str) -> bool:
         """Validate IFSC code format."""

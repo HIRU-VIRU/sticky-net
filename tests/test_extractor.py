@@ -91,10 +91,12 @@ class TestIntelligenceExtractor:
         assert len(result.phishing_links) > 0
 
     def test_ignores_normal_url(self, extractor: IntelligenceExtractor):
-        """Should ignore non-suspicious URLs."""
+        """In honeypot context, ALL URLs from scammers are extracted (no filtering)."""
         text = "Visit https://google.com for search"
         result = extractor.extract(text)
-        assert "google.com" not in str(result.phishing_links)
+        # After removing is_suspicious_url filter, even "normal" URLs are extracted
+        # This is correct for honeypot - any URL shared by a scammer is intelligence
+        assert "google.com" in str(result.phishing_links)
 
     # Email Tests
     def test_extracts_email(self, extractor: IntelligenceExtractor):

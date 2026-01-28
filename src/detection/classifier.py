@@ -1,5 +1,6 @@
 """AI-based scam classification using Gemini 3 Flash."""
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass, field
@@ -260,49 +261,93 @@ Return ONLY valid JSON (no markdown):
             # Try primary model (Gemini 3 Flash) first, then fallback (Gemini 2.5 Flash)
             models_to_try = [self.model, self.fallback_model]
             response_text = None
+            timeout_seconds = self.settings.api_timeout_seconds
+            max_retries = self.settings.gemini_max_retries
+            retry_delay = self.settings.gemini_retry_delay_seconds
             
             for model_name in models_to_try:
-                try:
-                    self.logger.debug(f"Trying classification model: {model_name}")
-                    
-                    # Build config (thinking is high by default in Gemini 3)
-                    config = types.GenerateContentConfig(
-                        temperature=0.1,  # Low temperature for consistent classification
-                        safety_settings=CLASSIFIER_SAFETY_SETTINGS,
-                        max_output_tokens=10000,
-                    )
-                    
-                    response = self.client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=config,
-                    )
-                    
-                    # Use helper to avoid thought_signature warning in Gemini 3
-                    response_text = _extract_text_from_response(response)
-                    
-                    # Check if we got a valid response
-                    if response_text and len(response_text.strip()) > 0:
-                        self._last_model_used = model_name
-                        self.logger.info(
-                            "Classification successful",
-                            model=model_name,
-                            response_length=len(response_text)
-                        )
-                        break
-                    else:
-                        self.logger.warning(
-                            "Empty response from model, trying fallback",
-                            model=model_name
+                # Retry loop for timeout handling
+                for attempt in range(max_retries + 1):
+                    try:
+                        self.logger.debug(
+                            f"Trying classification model: {model_name}",
+                            attempt=attempt + 1,
+                            max_retries=max_retries,
+                            timeout=timeout_seconds,
                         )
                         
-                except Exception as e:
-                    self.logger.warning(
-                        "Classification model failed, trying fallback",
-                        model=model_name,
-                        error=str(e)
-                    )
-                    continue
+                        # Build config (thinking is high by default in Gemini 3)
+                        config = types.GenerateContentConfig(
+                            temperature=0.1,  # Low temperature for consistent classification
+                            safety_settings=CLASSIFIER_SAFETY_SETTINGS,
+                            max_output_tokens=10000,
+                        )
+                        
+                        # Wrap API call with timeout (async with executor)
+                        response = await asyncio.wait_for(
+                            asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: self.client.models.generate_content(
+                                    model=model_name,
+                                    contents=prompt,
+                                    config=config,
+                                )
+                            ),
+                            timeout=timeout_seconds,
+                        )
+                        
+                        # Use helper to avoid thought_signature warning in Gemini 3
+                        response_text = _extract_text_from_response(response)
+                        
+                        # Check if we got a valid response
+                        if response_text and len(response_text.strip()) > 0:
+                            self._last_model_used = model_name
+                            self.logger.info(
+                                "Classification successful",
+                                model=model_name,
+                                response_length=len(response_text),
+                                attempt=attempt + 1,
+                            )
+                            break
+                        else:
+                            self.logger.warning(
+                                "Empty response from model, trying fallback",
+                                model=model_name
+                            )
+                            break  # Don't retry on empty response, try fallback model
+                            
+                    except asyncio.TimeoutError:
+                        self.logger.warning(
+                            "Gemini API timeout during classification",
+                            model=model_name,
+                            attempt=attempt + 1,
+                            timeout_seconds=timeout_seconds,
+                        )
+                        if attempt < max_retries:
+                            self.logger.info(
+                                f"Retrying classification after {retry_delay}s delay",
+                                remaining_retries=max_retries - attempt,
+                            )
+                            await asyncio.sleep(retry_delay)
+                            continue
+                        else:
+                            self.logger.error(
+                                "Max retries exceeded for classification model",
+                                model=model_name,
+                            )
+                            break  # Try fallback model
+                            
+                    except Exception as e:
+                        self.logger.warning(
+                            "Classification model failed, trying fallback",
+                            model=model_name,
+                            error=str(e)
+                        )
+                        break  # Don't retry on other errors, try fallback model
+                
+                # If we got a valid response, break out of model loop
+                if response_text and len(response_text.strip()) > 0:
+                    break
             
             if response_text:
                 return self._parse_response(response_text)

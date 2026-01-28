@@ -59,11 +59,26 @@ URL_PATTERN = re.compile(
 
 # Suspicious URL indicators for phishing detection
 SUSPICIOUS_URL_INDICATORS = [
-    "bit.ly", "tinyurl", "t.co", "goo.gl",  # URL shorteners
-    "login", "verify", "update", "secure", "account",  # Phishing keywords
-    "kyc", "otp", "bank", "sbi", "hdfc", "icici",  # Bank-related
-    ".tk", ".ml", ".ga", ".cf", ".gq",  # Free TLDs often used in phishing
-    "telegram", "wa.me", "whatsapp",  # Messaging links
+    # URL shorteners
+    "bit.ly", "tinyurl", "t.co", "goo.gl", "is.gd", "cutt.ly", "rebrand.ly",
+    # Phishing keywords
+    "login", "verify", "update", "secure", "account", "signin", "password",
+    # KYC/OTP scam keywords
+    "kyc", "otp", "bank", "sbi", "hdfc", "icici", "axis", "kotak", "pnb",
+    # Brand impersonation (common in Indian scams)
+    "amazon", "flipkart", "paytm", "phonepe", "gpay", "google-pay",
+    "kbc", "jio", "airtel", "vodafone", "bsnl",
+    # Prize/lottery/refund scam keywords
+    "prize", "claim", "refund", "reward", "winner", "lucky", "lottery",
+    "cashback", "bonus", "offer", "gift", "free", "win",
+    # Job scam keywords
+    "jobs", "hiring", "vacancy", "career", "recruitment", "salary",
+    # Free/suspicious TLDs often used in phishing
+    ".tk", ".ml", ".ga", ".cf", ".gq",  # Free domains
+    ".xyz", ".work", ".top", ".site", ".online", ".club", ".icu", ".buzz",
+    ".co.in",  # Often abused for Indian phishing
+    # Messaging links
+    "telegram", "wa.me", "whatsapp", "t.me",
 ]
 
 # Indian Bank Names
@@ -102,6 +117,28 @@ INDIAN_BANK_NAMES = [
     "Jio Payments Bank", "Jio Bank",
     "Fino Payments Bank", "Fino Bank",
 ]
+
+# Blocklist of common false positive words for beneficiary name extraction
+BENEFICIARY_NAME_BLOCKLIST = {
+    # Action words commonly mistaken for names
+    "now", "before", "paying", "name", "sir", "madam", "ji",
+    "please", "urgent", "click", "here", "send", "pay", "fast",
+    # Financial/banking terms
+    "verification", "account", "bank", "upi", "payment", "money",
+    "transfer", "today", "immediately", "urgent", "asap", "quick",
+    "verify", "update", "link", "otp", "pin", "password", "amount",
+    "rupees", "rs", "inr", "credited", "debited", "pending", "failed",
+    "success", "transaction", "beneficiary", "receiver", "sender",
+    # Common false positive phrases
+    "the", "and", "for", "with", "from", "holder", "number",
+    "dear", "customer", "user", "member", "client", "support",
+    "help", "desk", "center", "service", "team", "officer",
+    # Title/honorific words
+    "mr", "mrs", "ms", "dr", "shri", "smt", "sahab",
+    # Common verbs/actions
+    "call", "contact", "message", "reply", "confirm", "complete",
+    "submit", "enter", "provide", "share", "receive", "collect",
+}
 
 
 # =============================================================================
@@ -265,7 +302,7 @@ def is_suspicious_url(url: str) -> bool:
 
 def validate_beneficiary_name(name: str) -> bool:
     """
-    Validate a beneficiary/account holder name.
+    Validate a beneficiary/account holder name, filtering false positives.
 
     Args:
         name: Name string
@@ -273,25 +310,31 @@ def validate_beneficiary_name(name: str) -> bool:
     Returns:
         True if valid name, False otherwise
     """
-    if not name or len(name) < 2:
+    if not name or len(name) < 3:
         return False
 
     clean_name = name.strip()
+
+    # Should have reasonable length (3-50 characters)
+    if len(clean_name) > 50:
+        return False
+
+    # Must be mostly alphabetic (allow spaces and common name punctuation)
+    alpha_only = clean_name.replace(" ", "").replace(".", "").replace("'", "").replace("-", "")
+    if not alpha_only.isalpha():
+        return False
 
     # Should contain only letters, spaces, and common name characters
     if not re.match(r"^[A-Za-z][A-Za-z\s.''-]+$", clean_name):
         return False
 
-    # Should have reasonable length (2-50 characters)
-    if len(clean_name) > 50:
+    # Reject if any word is in the blocklist
+    words = clean_name.lower().split()
+    if any(word in BENEFICIARY_NAME_BLOCKLIST for word in words):
         return False
 
-    # Should not be common words that might be false positives
-    common_words = [
-        "the", "and", "for", "with", "from", "bank", "account",
-        "transfer", "send", "pay", "name", "holder"
-    ]
-    if clean_name.lower() in common_words:
+    # Reject single-word names that are too short (likely false positives)
+    if len(words) == 1 and len(clean_name) < 4:
         return False
 
     return True

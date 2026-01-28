@@ -1,5 +1,6 @@
 """Main honeypot agent implementation using Gemini 3 Pro."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -214,6 +215,12 @@ class HoneypotAgent:
         # Calculate duration
         duration = int(time.time() - start_time)
 
+        # Check if scammer's message contains URLs that weren't extracted yet
+        has_unextracted_urls = self._has_unextracted_urls(
+            message.text,
+            extracted_intel.get("phishing_links", []) if extracted_intel else []
+        )
+
         # Check if engagement should continue
         state = EngagementState(
             mode=engagement_mode,
@@ -222,6 +229,7 @@ class HoneypotAgent:
             intelligence_complete=False,  # Set by intelligence extractor
             scammer_suspicious=False,  # Detect from response patterns
             turns_since_new_info=0,  # Track over time
+            has_unextracted_urls=has_unextracted_urls,
         )
         should_continue = self.policy.should_continue(state)
         exit_reason = self.policy.get_exit_reason(state) if not should_continue else None
@@ -332,9 +340,13 @@ class HoneypotAgent:
         fake_data: dict | None = None,
     ) -> str:
         """Build conversation prompt for Gemini - simplified for agentic prompts."""
+        # Limit context to last N turns to reduce latency on deep conversations
+        max_turns = self.settings.context_window_turns
+        truncated_history = history[-max_turns:] if len(history) > max_turns else history
+        
         # Format conversation history
         history_text = ""
-        for msg in history[-10:]:  # Last 10 messages for context
+        for msg in truncated_history:
             sender = "SCAMMER" if msg.sender == SenderType.SCAMMER else "YOU"
             history_text += f"[{sender}]: {msg.text}\n"
 
@@ -400,56 +412,100 @@ Generate your response as Pushpa Verma:"""
         # Try primary model (Gemini 3 Pro) first, then fallback (Gemini 2.5 Pro)
         models_to_try = [self.model, self.fallback_model]
         response_text = None
+        timeout_seconds = self.settings.api_timeout_seconds
+        max_retries = self.settings.gemini_max_retries
+        retry_delay = self.settings.gemini_retry_delay_seconds
         
         for model_name in models_to_try:
-            try:
-                self.logger.debug(f"Trying model: {model_name}")
-                
-                # Gemini 3 Pro needs higher max_output_tokens because its
-                # internal "thinking" consumes output tokens. 256 is too small
-                # and causes MAX_TOKENS finish reason with empty text.
-                # Thinking level is HIGH by default in Gemini 3
-                max_tokens = 65536
-                
-                # Build config with model-specific settings
-                config = types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=self.settings.llm_temperature,
-                    max_output_tokens=max_tokens,
-                    safety_settings=HONEYPOT_SAFETY_SETTINGS,
-                )
-                
-                response = self.client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=config,
-                )
-                
-                # Use helper to avoid thought_signature warning in Gemini 3
-                response_text = _extract_text_from_response(response)
-                
-                # Check if we got a valid response
-                if response_text and len(response_text.strip()) > 0:
-                    self._last_model_used = model_name
-                    self.logger.info(
-                        "Response generated successfully",
-                        model=model_name,
-                        response_length=len(response_text)
-                    )
-                    break
-                else:
-                    self.logger.warning(
-                        "Empty response from model, trying fallback",
-                        model=model_name
+            # Retry loop for timeout handling
+            for attempt in range(max_retries + 1):
+                try:
+                    self.logger.debug(
+                        f"Trying model: {model_name}",
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                        timeout=timeout_seconds,
                     )
                     
-            except Exception as e:
-                self.logger.warning(
-                    "Model failed, trying fallback",
-                    model=model_name,
-                    error=str(e)
-                )
-                continue
+                    # Gemini 3 Pro needs higher max_output_tokens because its
+                    # internal "thinking" consumes output tokens. 256 is too small
+                    # and causes MAX_TOKENS finish reason with empty text.
+                    # Thinking level is HIGH by default in Gemini 3
+                    max_tokens = 65536
+                    
+                    # Build config with model-specific settings
+                    config = types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=self.settings.llm_temperature,
+                        max_output_tokens=max_tokens,
+                        safety_settings=HONEYPOT_SAFETY_SETTINGS,
+                    )
+                    
+                    # Wrap API call with timeout
+                    response = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: self.client.models.generate_content(
+                                model=model_name,
+                                contents=prompt,
+                                config=config,
+                            )
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                    
+                    # Use helper to avoid thought_signature warning in Gemini 3
+                    response_text = _extract_text_from_response(response)
+                    
+                    # Check if we got a valid response
+                    if response_text and len(response_text.strip()) > 0:
+                        self._last_model_used = model_name
+                        self.logger.info(
+                            "Response generated successfully",
+                            model=model_name,
+                            response_length=len(response_text),
+                            attempt=attempt + 1,
+                        )
+                        break
+                    else:
+                        self.logger.warning(
+                            "Empty response from model, trying fallback",
+                            model=model_name,
+                        )
+                        break  # Don't retry on empty response, try fallback model
+                        
+                except asyncio.TimeoutError:
+                    self.logger.warning(
+                        "Gemini API timeout",
+                        model=model_name,
+                        attempt=attempt + 1,
+                        timeout_seconds=timeout_seconds,
+                    )
+                    if attempt < max_retries:
+                        self.logger.info(
+                            f"Retrying after {retry_delay}s delay",
+                            remaining_retries=max_retries - attempt,
+                        )
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    else:
+                        self.logger.error(
+                            "Max retries exceeded for model",
+                            model=model_name,
+                        )
+                        break  # Try fallback model
+                        
+                except Exception as e:
+                    self.logger.warning(
+                        "Model failed, trying fallback",
+                        model=model_name,
+                        error=str(e),
+                    )
+                    break  # Don't retry on other errors, try fallback model
+            
+            # If we got a valid response, break out of model loop
+            if response_text and len(response_text.strip()) > 0:
+                break
         
         # Handle None response - use fallback response
         if not response_text:
@@ -512,6 +568,45 @@ Generate your response as Pushpa Verma:"""
         notes_parts.append(f"Persona: {persona.emotional_state.value}")
 
         return " | ".join(notes_parts)
+    
+    def _has_unextracted_urls(self, message_text: str, extracted_urls: list[str]) -> bool:
+        """
+        Check if message contains URLs that haven't been extracted yet.
+        
+        Args:
+            message_text: The scammer's message text
+            extracted_urls: List of URLs already extracted
+            
+        Returns:
+            True if message contains unextracted URLs
+        """
+        import re
+        
+        # Same pattern as extractor uses
+        URL_PATTERN = re.compile(
+            r"https?://[\w.-]+(?:\.[a-z]{2,10})+(?:/[^\s<>\"'{}|\\^`\[\]]*)?",
+            re.IGNORECASE,
+        )
+        
+        # Find all URLs in the message
+        urls_in_message = URL_PATTERN.findall(message_text)
+        
+        if not urls_in_message:
+            return False
+        
+        # Check if any URLs are new (not in extracted_urls)
+        extracted_set = set(url.rstrip(".,;:!?)") for url in extracted_urls)
+        for url in urls_in_message:
+            clean_url = url.rstrip(".,;:!?)")
+            if clean_url not in extracted_set:
+                self.logger.info(
+                    "Detected unextracted URL in message",
+                    url=clean_url,
+                    message_preview=message_text[:100]
+                )
+                return True
+        
+        return False
 
     def end_conversation(self, conversation_id: str) -> None:
         """Clean up persona and fake data when conversation ends."""

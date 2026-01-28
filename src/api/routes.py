@@ -108,11 +108,27 @@ async def analyze_message(request: AnalyzeRequest) -> AnalyzeResponse:
         
         # Exit responses when high-value intelligence is extracted
         exit_responses = [
+            # Original responses
             "okay i am calling that number now, hold on...",
             "wait my son just came home, let me ask him to help me with this",
             "one second, someone is at the door, i will call you back",
             "okay i sent the money, now my phone is dying, i need to charge it",
             "hold on, i am getting another call from my bank, let me check",
+            # New variety - domestic interruptions
+            "oh no my doorbell is ringing, someone is at the door... i will do this later",
+            "sorry my neighbor aunty just came, i have to go help her with something urgent",
+            "arey my grandson is crying, i need to check on him... one minute",
+            "oh god my cooking is burning on the stove! i smell smoke!! wait wait",
+            "wait my daughter-in-law is calling me for lunch, i have to go eat first",
+            "oh the milk is boiling over! wait wait i have to go to kitchen!!",
+            # New variety - health/personal
+            "my blood pressure medicine time ho gaya, i feel dizzy... let me take rest",
+            "ji actually i just remembered i have doctor appointment today, need to leave now",
+            "sorry sir power cut ho gaya, my phone battery is only 2%... will call you back",
+            # New variety - skepticism/confusion
+            "wait i am getting another call, it shows BANK on my phone... should i pick up??",
+            "hold on my beti is asking who i am talking to, she looks worried...",
+            "one second, my husband just came and he is asking what i am doing on phone",
         ]
         
         if high_value_complete:
@@ -246,6 +262,12 @@ async def analyze_message(request: AnalyzeRequest) -> AnalyzeResponse:
             except ValueError:
                 scam_type_enum = ScamType.OTHERS
         
+        # Ensure agentResponse is never None
+        agent_response = engagement_result.response
+        if not agent_response:
+            agent_response = "Sorry, I'm having trouble understanding. Can you repeat that?"
+            log.warning("Agent response was None, using fallback")
+        
         return AnalyzeResponse(
             status=StatusType.SUCCESS,
             scamDetected=True,
@@ -257,7 +279,7 @@ async def analyze_message(request: AnalyzeRequest) -> AnalyzeResponse:
             ),
             extractedIntelligence=merged_intel,
             agentNotes=engagement_result.notes,
-            agentResponse=engagement_result.response,
+            agentResponse=agent_response,
         )
 
     except StickyNetError as e:
